@@ -11,6 +11,49 @@ else Rust targets, and cross-compiles to a Raspberry Pi or Jetson with
 Feed it lidar scans (from [`olivaw-lidar`](../olivaw-lidar) or any other
 source); it produces a consistent occupancy-grid map and a pose estimate.
 
+## How it works
+
+```mermaid
+flowchart LR
+    subgraph sensor["your sensor"]
+        L["lidar scans<br/>(any source)"]
+    end
+    subgraph slam["olivaw-slam"]
+        P["preprocess<br/>gate, outliers, voxel"]
+        M["correlative matcher<br/>scan vs accumulated map"]
+        K["keyframes<br/>every 0.3 m / 0.3 rad"]
+        G["occupancy grid<br/>log-odds"]
+        PG["pose graph<br/>(factrs)"]
+        LC["loop closure<br/>detect, verify, gate"]
+    end
+    L -->|"convert units once"| P --> M --> K
+    M -->|"pose estimate"| OUT["your planner / UI / logs"]
+    K --> G
+    K --> PG
+    K --> LC
+    LC -->|"accepted constraint"| PG
+    PG -->|"corrected poses"| G
+    G -->|"match target"| M
+```
+
+The cycle on the right is the core idea: scans are matched against the
+accumulated map (not the previous scan), so drift does not compound; accepted
+loop closures re-optimize the pose graph and the map is rebuilt from the
+corrected poses — the map heals itself.
+
+```mermaid
+sequenceDiagram
+    participant R as your robot loop
+    participant S as Slam
+    R->>S: process_scan(cloud)
+    S->>S: preprocess, match, maybe keyframe + close loops
+    S-->>R: Pose2 (x, y, theta)
+    Note over R,S: one call per scan, no threads,<br/>no devices - you drive the loop
+```
+
+Full design docs, algorithm explanations, pitfalls, and the roadmap live in
+[documentation/](documentation/README.md).
+
 ## Quick start: live SLAM with a SLAMTEC C1
 
 Plug the C1 into USB, install the rerun viewer once
@@ -154,4 +197,24 @@ down and cross-compiles to `aarch64-unknown-linux-gnu` out of the box; `viz`
 millimetres/degrees (like `olivaw-lidar`) are converted once at the boundary —
 see the examples. Angles are `(-π, π]`, CCW-positive, x-forward y-left frame.
 
-See [CLAUDE.md](CLAUDE.md) for the full architecture and engineering rules.
+## Documentation
+
+The [documentation/](documentation/README.md) folder is the project's long-term
+memory, written so a newcomer (or a future you, months away) can understand and
+modify the system:
+
+- [Overview & architecture](documentation/01-overview.md) and the
+  [development history](documentation/02-development-history.md)
+- Per-module deep dives: [core types](documentation/03-core-types.md),
+  [preprocessing](documentation/04-preprocessing.md),
+  [occupancy grid](documentation/05-occupancy-grid.md),
+  [scan matching](documentation/06-scan-matching.md),
+  [pose graph](documentation/07-pose-graph.md),
+  [loop closure](documentation/08-loop-closure.md),
+  [the orchestrator](documentation/09-slam-orchestrator.md)
+- [Testing & benchmarks](documentation/10-testing-and-benchmarks.md),
+  [pitfalls & lessons learned](documentation/11-pitfalls-and-lessons.md), and
+  the [roadmap, including the honest slam_toolbox comparison](documentation/12-roadmap.md)
+
+[CLAUDE.md](CLAUDE.md) remains the authoritative engineering spec the project
+was built against.
