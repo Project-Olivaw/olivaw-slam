@@ -139,10 +139,10 @@ circuit recording.
 
 | feature     | default | what it adds |
 |-------------|---------|--------------|
-| `std`       | ✓       | (marker for future no_std work) |
-| `parallel`  |         | rayon-parallel CSM search |
-| `serialize` |         | `Slam::save`/`Slam::load`, serde on configs |
-| `viz`       |         | `OccupancyGrid::log_to_rerun` + the examples |
+| `std`       | yes     | (marker for future no_std work) |
+| `parallel`  | no      | rayon-parallel CSM search |
+| `serialize` | no      | `Slam::save`/`Slam::load`, serde on configs |
+| `viz`       | no      | `OccupancyGrid::log_to_rerun` + the examples |
 
 The deployable configuration (`parallel serialize`) is pure Rust all the way
 down and cross-compiles to `aarch64-unknown-linux-gnu` out of the box; `viz`
