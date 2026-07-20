@@ -8,28 +8,112 @@ inside ROS2, but as a plain Rust library: it runs on macOS, Linux, and anything
 else Rust targets, and cross-compiles to a Raspberry Pi or Jetson with
 `cargo build --target aarch64-unknown-linux-gnu`.
 
-## What it does
-
 Feed it lidar scans (from [`olivaw-lidar`](../olivaw-lidar) or any other
 source); it produces a consistent occupancy-grid map and a pose estimate.
 
-```rust,no_run
-use olivaw_slam::{Slam, SlamConfig, ScanCloud};
+## Quick start: live SLAM with a SLAMTEC C1
 
-let mut slam = Slam::new(SlamConfig::default())?;
-for cloud in scans {                       // ScanCloud: metres, x-fwd/y-left
-    let pose = slam.process_scan(&cloud)?;
-}
-slam.grid().export_map("house".as_ref())?; // house.pgm + house.yaml (map_server format)
-slam.save("house.olivaw".as_ref())?;       // full state, reloadable (feature "serialize")
+Plug the C1 into USB, install the rerun viewer once
+(`uv tool install rerun-sdk`), then:
+
+```sh
+cargo run --release --example slam_live --features "viz serialize" -- --seconds 180
 ```
 
-The pipeline: **preprocess** (range gate, outlier rejection, voxel subsampling)
-→ **correlative scan matching** against the accumulated grid (Olson 2009 CSM —
-no odometry required, bounded runtime) → **keyframes + pose graph** (backed by
-[factrs](https://docs.rs/factrs)) → **loop closure** (candidate search →
-wide-window CSM verification → χ²-gated speculative optimization). Every layer
-is independently usable: `matcher::`, `grid::`, `graph::`, `loop_closure::`.
+The port is auto-detected. Walk the lidar around (level, slow walking pace,
+smooth turns) and watch the map, trajectory, and live scan build in the
+viewer at sensor rate (~30 ms per scan against the C1's ~120 ms scan period).
+Walk a closed circuit back to the start and you will see the loop-closure
+counter tick up as the map snaps into global consistency. On exit you get:
+
+- `live_map.pgm` + `live_map.yaml` — the map in standard `map_server` format
+- `live_map.olivaw` — the full SLAM state, reloadable with `Slam::load`
+
+## Record now, SLAM later
+
+Recorded data is how the algorithms here are actually developed and debugged —
+a recording is repeatable, a live run is not. Capture the raw byte stream with
+olivaw-lidar, then replay it through SLAM as many times as you like:
+
+```sh
+# 1. Record (~2 min at the C1's ~4.7 kHz ≈ 600k nodes):
+cd ../olivaw-lidar
+cargo run --release --example record -- --out ~/lidar-recordings --nodes 600000 --seconds 130
+
+# 2. Replay through the full pipeline, with visualization:
+cd ../olivaw-slam
+cargo run --release --example slam_from_recording --features "viz serialize" -- \
+    ~/lidar-recordings/c1_scan_1000_nodes.bin my_house
+```
+
+Keep good recordings — they make permanent regression fixtures.
+
+## All examples
+
+Every example runs with `--save out.rrd` instead of a live viewer window
+(inspect later with `rerun out.rrd`), and defaults to the committed fixture so
+a stranger can run it with zero setup.
+
+| example | what it shows |
+|---|---|
+| `slam_live` | Real-time SLAM from a plugged-in C1: map, trajectory, loop closures, per-scan timing. |
+| `slam_from_recording` | The same full pipeline on a recorded `.bin`; exports map + state. |
+| `grid_from_recording` | Just the occupancy grid, scans integrated at identity pose — the Phase 1 building block. |
+| `scan_matching_viz` | One correlative match: reference scan, query at its wrong guess, recovered alignment, and the score surface. The debugging instrument for matching problems. |
+
+```sh
+cargo run --release --example scan_matching_viz --features viz
+```
+
+## Using it in your robot
+
+The library never spawns threads or opens devices — you drive the loop, which
+is what makes it embeddable in anything: a plain binary, a dora-rs node, or a
+future ROS2 bridge.
+
+```rust,no_run
+use olivaw_slam::{Slam, SlamConfig, ScanCloud, Point2};
+
+let mut slam = Slam::new(SlamConfig::default())?;
+
+loop {
+    // 1. Get a scan from YOUR sensor source (driver, network, replay...).
+    //    Convert to metres, x-forward/y-left, ONCE at this boundary:
+    let points: Vec<Point2> = my_sensor_scan()
+        .map(|(range_m, bearing_rad)| Point2::new(
+            range_m * bearing_rad.cos(),
+            range_m * bearing_rad.sin(),
+        ))
+        .collect();
+    let cloud = ScanCloud::new(points, timestamp_ns);
+
+    // 2. One call per scan. Everything happens inside: preprocessing,
+    //    scan-to-map matching, keyframes, pose graph, loop closure.
+    let pose = slam.process_scan(&cloud)?;
+
+    // 3. Use the estimate — feed your planner, your UI, your logs.
+    println!("robot at ({:.2}, {:.2}) heading {:.2} rad", pose.x, pose.y, pose.theta);
+}
+```
+
+The day-two workflow — map once, then localize in the saved map (what a
+production robot runs day to day):
+
+```rust,no_run
+use olivaw_slam::Slam;
+
+// After a mapping session: slam.save("house.olivaw".as_ref())?;
+let mut slam = Slam::load("house.olivaw".as_ref())?;
+slam.set_localization_mode(true);   // the map is now frozen
+// ... process_scan() as usual: poses update, the map never changes.
+```
+
+Every stage is also usable on its own — depend only on what you need:
+`matcher::CorrelativeMatcher` (CSM per Olson 2009, no initial guess needed,
+bounded runtime), `matcher::IcpMatcher`, `grid::OccupancyGrid`,
+`graph::PoseGraph` (backed by [factrs](https://docs.rs/factrs)),
+`loop_closure::LoopDetector`. Every threshold in every stage is a documented
+config field with a sane default — nothing is hardcoded.
 
 ## Status
 
@@ -41,26 +125,15 @@ All phases of the 0.1.0 plan are implemented and tested:
   drift is corrected to **2.3 cm** final error by loop closure (tested).
 - Maps save and reload with bit-identical geometry; localization mode tracks
   in a frozen map without modifying it (tested).
+- Verified on real hardware: a SLAMTEC C1 room capture produces a sharp map,
+  and live SLAM runs at ~30 ms/scan (4× real-time headroom).
 - `#![forbid(unsafe_code)]`, no `unwrap`/`panic!` in library code, clippy
-  pedantic clean, benchmarked with criterion.
+  pedantic clean, criterion benchmarks for every hot path.
 
-## Examples (rerun visualization)
-
-```sh
-# Occupancy grid from a raw olivaw-lidar recording (Phase 1 milestone):
-cargo run --release --example grid_from_recording --features viz -- recording.bin
-
-# Watch a correlative scan match + its score surface:
-cargo run --release --example scan_matching_viz --features viz
-
-# Full SLAM on a recording — map, trajectory, loop closures:
-cargo run --release --example slam_from_recording --features "viz serialize" -- recording.bin
-```
-
-Recordings are raw serial captures made with `olivaw-lidar`'s `record`
-example; each example defaults to the committed fixture so a stranger can run
-it with no setup. Install the rerun viewer with `uv tool install rerun-sdk`
-(or pass `--save out.rrd` to run headless).
+Known gaps, on purpose and tracked: no motion deskew yet (carry the sensor
+smoothly), point-to-line ICP upgrade pending (CSM is the workhorse), and the
+`slam_toolbox` oracle comparison needs a Docker/ROS2 session with a real
+circuit recording.
 
 ## Features
 
